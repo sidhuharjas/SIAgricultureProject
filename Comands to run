@@ -1,0 +1,8 @@
+# 1. Run your script
+python getData2.py
+
+# 2. Create the symbolic link (Replace the path below if your output path is different)
+ln -s /users/PZS1154/harjassidhu/.cache/kagglehub/datasets/swish9/weeds-detection/versions/1 ./weeds_data
+
+# 3. Verify the contents
+ls weeds_data
