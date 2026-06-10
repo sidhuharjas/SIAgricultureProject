@@ -1,98 +1,130 @@
-cat << 'EOF' > prep_pipeline.py
 import os
-import cv2
+import time
 import random
-import numpy as np
-from pathlib import Path
+import glob
+from PIL import Image, ImageEnhance
 
-def create_output_structure(base_dir):
-    """Creates the target directory structure for annotation."""
-    output_path = Path(base_dir) / "ready_for_annotation"
-    images_path = output_path / "images"
-    labels_path = output_path / "labels"
-    
-    images_path.mkdir(parents=True, exist_ok=True)
-    labels_path.mkdir(parents=True, exist_ok=True)
-    
-    return images_path, labels_path
+# ==============================================================================
+# 1. CONFIGURATION & RANDOMNESS INITIALIZATION
+# ==============================================================================
+# High‑resolution dynamic seed for true randomness
+dynamic_seed = int(time.time() * 1_000_000) & 0xFFFFFFFF
+random.seed(dynamic_seed)
 
-def apply_weird_augmentations(image):
-    """Applies random rotations, color distortions, and tilts."""
-    h, w = image.shape[:2]
-    
-    # 1. Random Rotation (between -45 and 45 degrees)
-    angle = random.uniform(-45, 45)
-    matrix = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-    image = cv2.warpAffine(image, matrix, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-    
-    # 2. Random HSV Color Distortion (Brightness/Saturation)
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
-    hsv[:, :, 1] *= random.uniform(0.6, 1.4) # Saturation
-    hsv[:, :, 2] *= random.uniform(0.6, 1.4) # Brightness
-    hsv = np.clip(hsv, 0, 255).astype(np.uint8)
-    image = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
-    
-    # 3. Random Horizontal Flip (50% chance)
-    if random.choice([True, False]):
-        image = cv2.flip(image, 1)
-        
-    return image
+BASE_DIR = "/users/PZS1154/harjassidhu/SIAgricultureProject"
+OUTPUT_DIR = os.path.join(BASE_DIR, "ready_for_annotation")
 
-def main():
-    # Start tracking directly from the main symlink folder
-    source_dir = Path("crop_weed_data")
-    project_dir = Path("/users/PZS1154/harjassidhu/SIAgricultureProject")
-    
-    if not source_dir.exists():
-        print(f"Error: Source directory {source_dir} not found.")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+print(f"[INIT] Output directory ready: {OUTPUT_DIR}")
+
+# ==============================================================================
+# 2. AUGMENTATION HELPERS
+# ==============================================================================
+def apply_random_augmentation(img_path):
+    """
+    Applies random brightness, contrast, saturation, and optional horizontal flip.
+    Returns the augmented PIL image and a boolean indicating if a flip occurred.
+    """
+    img = Image.open(img_path).convert("RGB")
+    flipped = False
+
+    # Random brightness (0.7–1.3)
+    img = ImageEnhance.Brightness(img).enhance(random.uniform(0.7, 1.3))
+
+    # Random contrast (0.7–1.3)
+    img = ImageEnhance.Contrast(img).enhance(random.uniform(0.7, 1.3))
+
+    # Random saturation (0.6–1.4)
+    img = ImageEnhance.Color(img).enhance(random.uniform(0.6, 1.4))
+
+    # 50% chance horizontal flip
+    if random.random() < 0.5:
+        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        flipped = True
+
+    return img, flipped
+
+
+def process_yolo_label(src_label_path, dst_label_path, flipped):
+    """
+    Copies YOLO label file and adjusts x-center if the image was flipped.
+    """
+    if not os.path.exists(src_label_path):
+        # Create empty label file if none exists
+        open(dst_label_path, "w").close()
         return
 
-    # Set up destination folders
-    img_out, lbl_out = create_output_structure(project_dir)
-    print(f"Target directories initialized at: {project_dir / 'ready_for_annotation'}")
+    with open(src_label_path, "r") as f:
+        lines = f.readlines()
 
-    # Use rglob to scan recursively through all subdirectories (like agri_data/data)
-    supported_extensions = ["*.jpg", "*.jpeg", "*.png", "*.PNG", "*.JPG", "*.JPEG"]
-    image_files = []
-    for ext in supported_extensions:
-        image_files.extend(list(source_dir.rglob(ext)))
-
-    if not image_files:
-        print(f"Error: Still couldn't find any images inside {source_dir} using recursive search.")
-        return
-
-    print(f"Found {len(image_files)} raw images deep inside the directory tree.")
-    print("Generating augmented variations...")
-
-    counter = 0
-    for img_path in image_files:
-        raw_img = cv2.imread(str(img_path))
-        if raw_img is None:
+    new_lines = []
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) < 5:
+            new_lines.append(line.strip())
             continue
-            
-        base_name = img_path.stem
-        
-        # Generate 3 variations per image
-        for i in range(3):
-            weird_img = apply_weird_augmentations(raw_img)
-            
-            # Save format setup
-            new_filename = f"aug_{base_name}_{i}.jpg"
-            target_image_path = img_out / new_filename
-            cv2.imwrite(str(target_image_path), weird_img)
-            
-            # Create matching empty label file
-            target_label_path = lbl_out / f"aug_{base_name}_{i}.txt"
-            open(target_label_path, 'a').close()
-            
-            counter += 1
 
-    print("\n" + "="*50)
-    print("PIPELINE COMPLETE: DATASET IS READY FOR ANNOTATION")
-    print(f"Total files generated: {counter} images & {counter} matching label files.")
-    print(f"Output Location: {project_dir}/ready_for_annotation/")
-    print("="*50)
+        class_id = parts[0]
+        x_center = float(parts[1])
+        y_center = float(parts[2])
+        width = float(parts[3])
+        height = float(parts[4])
+
+        # Flip x-center if image was flipped
+        if flipped:
+            x_center = 1.0 - x_center
+
+        extra = " ".join(parts[5:])
+        formatted = f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+        if extra:
+            formatted += f" {extra}"
+
+        new_lines.append(formatted)
+
+    with open(dst_label_path, "w") as f:
+        f.write("\n".join(new_lines) + "\n")
+
+# ==============================================================================
+# 3. PIPELINE EXECUTION
+# ==============================================================================
+def run_pipeline():
+    # Collect all images except those already in the output directory
+    extensions = ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG"]
+    raw_images = []
+
+    for ext in extensions:
+        for f in glob.glob(os.path.join(BASE_DIR, "**", ext), recursive=True):
+            if "ready_for_annotation" not in f:
+                raw_images.append(f)
+
+    raw_images = list(set(raw_images))
+    total_raw = len(raw_images)
+
+    print(f"[SCAN] Found {total_raw} raw images.")
+    print("[RUN] Generating 3 random augmentations per image...")
+
+    total_generated = 0
+
+    for img_path in raw_images:
+        base_name = os.path.splitext(os.path.basename(img_path))[0]
+        src_label_path = os.path.splitext(img_path)[0] + ".txt"
+
+        for v in range(1, 4):
+            dst_img = os.path.join(OUTPUT_DIR, f"{base_name}_aug_v{v}.jpg")
+            dst_lbl = os.path.join(OUTPUT_DIR, f"{base_name}_aug_v{v}.txt")
+
+            aug_img, flipped = apply_random_augmentation(img_path)
+            aug_img.save(dst_img, quality=95)
+
+            process_yolo_label(src_label_path, dst_lbl, flipped)
+            total_generated += 1
+
+    print("\n" + "=" * 55)
+    print("[DONE] DATA AUGMENTATION COMPLETE")
+    print(f"Generated: {total_generated} images + {total_generated} labels")
+    print(f"Output Directory: {OUTPUT_DIR}")
+    print("=" * 55)
+
 
 if __name__ == "__main__":
-    main()
-EOF
+    run_pipeline()
