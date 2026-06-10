@@ -1,0 +1,7 @@
+path: /users/PZS1154/harjassidhu/SIAgricultureProject/crop_weed_data
+train: images/train
+val: images/val
+
+names:
+  0: plant
+  1: weed

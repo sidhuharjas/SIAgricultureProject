@@ -1,0 +1,8 @@
+path: /users/PZS1154/harjassidhu/SIAgricultureProject/dataset
+
+train: images/train
+val: images/val
+
+names:
+  0: plant
+nc: 1
